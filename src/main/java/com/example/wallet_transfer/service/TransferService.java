@@ -5,6 +5,8 @@ import com.example.wallet_transfer.entity.Transfer;
 import com.example.wallet_transfer.entity.Wallet;
 import com.example.wallet_transfer.exception.IdempotencyConflictException;
 import com.example.wallet_transfer.exception.InsufficientFundsException;
+import com.example.wallet_transfer.exception.TransferNotFoundException;
+import com.example.wallet_transfer.exception.TransferNotReversibleException;
 import com.example.wallet_transfer.exception.WalletNotFoundException;
 import com.example.wallet_transfer.repository.TransferRepository;
 import com.example.wallet_transfer.repository.WalletRepository;
@@ -28,18 +30,19 @@ public class TransferService {
     private final TransferRepository transferRepository;
     private final WalletRepository walletRepository;
 
-    // Domain metrics — surfaced at /actuator/prometheus for scraping/dashboards.
-    private final Counter transfersCreated;
+    // Domain metrics — surfaced at /metrics for scraping/dashboards.
+    private final Counter transfersCompleted;
     private final Counter transfersDeclinedInsufficient;
     private final Counter transfersIdempotentReplay;
     private final Counter transfersConflict;
+    private final Counter transfersReversed;
 
     public TransferService(TransferRepository transferRepository,
                            WalletRepository walletRepository,
                            MeterRegistry metrics) {
         this.transferRepository = transferRepository;
         this.walletRepository = walletRepository;
-        this.transfersCreated = Counter.builder("transfers.created")
+        this.transfersCompleted = Counter.builder("transfers.completed")
                 .description("transfers successfully completed").register(metrics);
         this.transfersDeclinedInsufficient = Counter.builder("transfers.declined.insufficient_funds")
                 .description("transfers declined due to insufficient funds").register(metrics);
@@ -47,6 +50,8 @@ public class TransferService {
                 .description("transfers that were idempotent replays of an existing key").register(metrics);
         this.transfersConflict = Counter.builder("transfers.conflict")
                 .description("same idempotency key reused with a different body").register(metrics);
+        this.transfersReversed = Counter.builder("transfers.reversed")
+                .description("transfers reversed").register(metrics);
     }
 
     @Transactional
@@ -104,9 +109,77 @@ public class TransferService {
         Transfer saved = transferRepository.findByIdempotencyKey(idempotencyKey)
                 .orElseThrow(() -> new IllegalStateException(
                         "Transfer must exist after insert: " + idempotencyKey));
-        transfersCreated.increment();
+        transfersCompleted.increment();
         log.info("transfer_completed transferId={} idempotencyKey={} from={} to={} amountPaise={}",
                 saved.getTransferId(), idempotencyKey, fromUserId, toUserId, amountPaise);
+        return TransferResponse.from(saved);
+    }
+
+    // Read a transfer by id (GET /transfers/{id}).
+    @Transactional(readOnly = true)
+    public TransferResponse getTransfer(long transferId) {
+        Transfer t = transferRepository.findById(transferId)
+                .orElseThrow(() -> new TransferNotFoundException(transferId));
+        return TransferResponse.from(t);
+    }
+
+    /**
+     * Reverse a completed transfer (R3): move the exact amount back recipient -> sender.
+     *
+     * Design: a reversal IS a transfer with the roles swapped, so it reuses the SAME atomic
+     * money-movement primitive (conditional debit + credit, deadlock-safe order). We record a
+     * NEW transfer row for the reversal (its own idempotency key), linked to the original via
+     * reverses_transfer_id, and flip the original's status to REVERSED — guarded so a transfer
+     * can only be reversed once.
+     */
+    @Transactional
+    public TransferResponse reverse(long originalTransferId, String idempotencyKey) {
+        Transfer original = transferRepository.findById(originalTransferId)
+                .orElseThrow(() -> new TransferNotFoundException(originalTransferId));
+
+        // Guard: only a COMPLETED transfer can be reversed. This UPDATE ... WHERE status='COMPLETED'
+        // is atomic — if 0 rows change, it was already reversed (or never completed) -> reject.
+        int flipped = transferRepository.markReversedIfCompleted(originalTransferId);
+        if (flipped == 0) {
+            throw new TransferNotReversibleException(originalTransferId);
+        }
+
+        // Money flows back: original recipient -> original sender.
+        long refundFrom = original.getToWalletId();     // recipient gives it back
+        long refundTo = original.getFromWalletId();      // sender receives it back
+        long amount = original.getAmountPaise();
+
+        String requestHash = computeRequestHash(refundFrom, refundTo, amount);
+
+        // Record the reversal as its own transfer row (idempotent on its own key), linked to the original.
+        int inserted = transferRepository.insertReversal(
+                idempotencyKey, requestHash, refundFrom, refundTo, amount, originalTransferId);
+        if (inserted == 0) {
+            // reversal key already used -> idempotent replay of the reversal
+            Transfer existing = transferRepository.findByIdempotencyKey(idempotencyKey)
+                    .orElseThrow(() -> new IllegalStateException(
+                            "Reversal key conflicted but no row found: " + idempotencyKey));
+            transfersIdempotentReplay.increment();
+            return TransferResponse.from(existing);
+        }
+
+        // Same atomic primitive as a normal transfer, deadlock-safe order.
+        // Note: the refund debits the original recipient; if they've since spent the funds this
+        // will decline (422) — an intentional policy choice (we do not allow the wallet to go negative).
+        if (refundFrom < refundTo) {
+            debitOrThrow(refundFrom, amount, "wallet:" + refundFrom);
+            walletRepository.credit(refundTo, amount);
+        } else {
+            walletRepository.credit(refundTo, amount);
+            debitOrThrow(refundFrom, amount, "wallet:" + refundFrom);
+        }
+
+        Transfer saved = transferRepository.findByIdempotencyKey(idempotencyKey)
+                .orElseThrow(() -> new IllegalStateException(
+                        "Reversal must exist after insert: " + idempotencyKey));
+        transfersReversed.increment();
+        log.info("transfer_reversed reversalId={} originalTransferId={} amountPaise={}",
+                saved.getTransferId(), originalTransferId, amount);
         return TransferResponse.from(saved);
     }
 
