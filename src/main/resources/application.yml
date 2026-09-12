@@ -1,0 +1,29 @@
+spring:
+  application:
+    name: wallet-transfer
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5434/wallet}
+    username: ${DB_USER:wallet}
+    password: ${DB_PASSWORD:wallet}
+  jpa:
+    hibernate:
+      ddl-auto: validate      # NEVER 'update' — Flyway owns the schema, JPA only validates it matches
+    open-in-view: false        # avoid the OSIV anti-pattern (holds DB connection through view render)
+  flyway:
+    enabled: true              # Flyway runs migrations on startup
+
+auth:
+  # HMAC secret for signing bearer tokens. Override in prod via AUTH_TOKEN_SECRET.
+  token-secret: ${AUTH_TOKEN_SECRET:dev-secret-change-me}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, prometheus, metrics, info   # /actuator/health + /actuator/prometheus + /actuator/metrics
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      application: wallet-transfer   # tag every metric so dashboards can filter by app
