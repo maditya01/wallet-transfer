@@ -1,0 +1,8 @@
+# build artifacts and caches — never copy into the image build context
+build/
+.gradle/
+.idea/
+*.iml
+.git/
+.DS_Store
+*.log
