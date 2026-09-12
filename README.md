@@ -47,6 +47,8 @@ All endpoints except `/auth/token`, `/actuator/*`, and `/metrics` require a bear
 | GET | `/wallets/{userId}` | current balance |
 | POST | `/wallets/{userId}/credit` | fund a wallet |
 | POST | `/transfers` | move money `{idempotencyKey, fromUserId, toUserId, amountPaise}` |
+| GET | `/transfers/{id}` | transfer status |
+| POST | `/transfers/{id}/reverse` | reverse a completed transfer (optional `Idempotency-Key` header) |
 | GET | `/actuator/health` | health (open) |
 | GET | `/metrics` | Prometheus metrics incl. domain counters (open) |
 
@@ -68,8 +70,9 @@ curl -X POST $BASE/transfers -H "Authorization: Bearer $TOKEN" \
 ## Observability
 - **Structured JSON logs** to stdout, each line carrying a `correlationId` (from the
   `X-Correlation-Id` request header, or generated). Trace one request across all its log lines.
-- **`/metrics`** exposes Prometheus text incl. domain counters: `transfers_created`,
-  `transfers_declined_insufficient_funds`, `transfers_idempotent_replay`, `transfers_conflict`.
+- **`/metrics`** exposes Prometheus text incl. domain counters: `transfers_completed`,
+  `transfers_declined_insufficient_funds`, `transfers_idempotent_replay`, `transfers_conflict`,
+  `transfers_reversed`.
 
 ## Config (environment variables)
 | Var | Purpose | Local default |

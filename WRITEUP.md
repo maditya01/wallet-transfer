@@ -29,6 +29,18 @@ Everything leans on **the database as the single point of atomic arbitration**, 
 - **Deadlock avoidance:** the two wallet rows are always touched in ascending `wallet_id` order,
   regardless of transfer direction, so opposite transfers (A→B and B→A) can't deadlock.
 
+## Reversal (`POST /transfers/{id}/reverse`)
+A reversal is **a transfer with the roles swapped** — it reuses the exact same atomic
+debit+credit primitive (money flows original-recipient → original-sender) and records its own
+ledger row with its own idempotency key, linked to the original via `reverses_transfer_id`.
+The original is flipped `COMPLETED → REVERSED` with an atomic guard —
+`UPDATE ... SET status='REVERSED' WHERE id=:id AND status='COMPLETED'` — so a transfer can be
+reversed **exactly once** (a second attempt updates 0 rows → 409). I deliberately did *not*
+special-case reversal logic; the ledger primitive was designed so reversal falls out of it.
+**Policy note:** if the original recipient has already spent the funds, the reversal's debit
+declines (422) rather than forcing the wallet negative — an intentional choice (the alternative,
+allow-negative-as-debt, is what some systems do; I chose strict non-negative balances).
+
 ## Where idempotency lives
 In the **same transaction** as the money movement. `INSERT INTO transfers ... ON CONFLICT
 (idempotency_key) DO NOTHING` is the first step; if it inserts 0 rows the key already exists, so
@@ -49,7 +61,12 @@ horizontally; correctness does not depend on app-instance count because all arbi
   a `transfer_declined_insufficient_funds` WARN log with the request's correlation id.
 - Duplicate key (retry) → original result returned, `transfers_idempotent_replay` counter++.
 - Key reuse, different body → 409, `transfers_conflict` counter++.
+- Reversal of an already-reversed / non-completed transfer → 409; a completed reversal
+  increments `transfers_reversed`.
 - DB down → app fails fast on startup / requests error; health endpoint reflects DB status.
+
+Domain counters at `/metrics`: `transfers_completed`, `transfers_declined_insufficient_funds`,
+`transfers_idempotent_replay`, `transfers_conflict`, `transfers_reversed`.
 - Structured JSON logs + `correlationId` let a single request be traced end-to-end; `/metrics`
   exposes request rate/latency and the domain counters above.
 
@@ -64,6 +81,11 @@ not a single AI-authored drop.
 ₹0. Render free web service + free managed Postgres, single small instance. Free tier sleeps on
 idle (~50s cold start) and the DB expires after 90 days — fine for this exercise; production would
 use a paid always-on instance and a durable DB.
+
+## Endpoints
+`POST /auth/token`, `POST /wallets`, `GET /wallets/{userId}`, `POST /wallets/{userId}/credit`,
+`POST /transfers`, `GET /transfers/{id}`, `POST /transfers/{id}/reverse`,
+plus `GET /actuator/health` and `GET /metrics` (open).
 
 ## Known trade-offs / what I'd do next
 - Bearer tokens are HMAC-signed and long-lived (no expiry/rotation) — a real system would use
