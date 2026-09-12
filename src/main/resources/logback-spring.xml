@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Structured JSON logging. Each log line is a single JSON object with a timestamp,
+  level, logger, message, the thread, and (crucially) the correlationId from MDC so
+  every line of a given request can be filtered together in a log aggregator.
+
+  Two profiles:
+    - default (deployed): JSON to stdout (12-factor; the platform captures stdout).
+    - "local": human-readable console, so local dev isn't a wall of JSON.
+-->
+<configuration>
+
+    <springProfile name="!local">
+        <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <includeMdcKeyName>correlationId</includeMdcKeyName>
+                <customFields>{"service":"wallet-transfer"}</customFields>
+            </encoder>
+        </appender>
+        <root level="INFO">
+            <appender-ref ref="JSON"/>
+        </root>
+    </springProfile>
+
+    <springProfile name="local">
+        <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder>
+                <pattern>%d{HH:mm:ss.SSS} %-5level [corrId=%X{correlationId:-none}] %logger{36} - %msg%n</pattern>
+            </encoder>
+        </appender>
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+    </springProfile>
+
+</configuration>
