@@ -32,8 +32,10 @@ public class BearerAuthFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = request.getRequestURI();
-        // leave probes and the token endpoint open
-        return path.startsWith("/actuator")
+        // leave the landing page, probes, metrics, and the token endpoint open
+        return path.equals("/")
+                || path.equals("/favicon.ico")
+                || path.startsWith("/actuator")
                 || path.equals("/metrics")
                 || path.startsWith("/auth/token");
     }
